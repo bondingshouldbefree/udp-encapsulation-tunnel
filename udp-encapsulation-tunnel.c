@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/prctl.h>
 #include <sys/sysinfo.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -512,24 +513,43 @@ static void cleanup_old_connections(struct tunnel_config *config)
 	}
 }
 
+static volatile sig_atomic_t running = 1;
+
+static void signal_handler(int signo)
+{
+	running = 0;
+}
+
 static void worker_process(int tun_fd, int udp_fd, struct tunnel_config *config)
 {
+	/* Set up death of parent detection */
+	if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) {
+		perror("prctl");
+		exit(1);
+	}
+
+	/* Check if parent already died */
+	if (getppid() == 1) {
+		exit(1);
+	}
+
 	fd_set readfds;
 	int maxfd;
 	time_t last_cleanup = time(NULL);
 
-	/* Block signals that should be handled by the parent */
-	sigset_t mask;
-	sigemptyset(&mask);
-	sigaddset(&mask, SIGINT);
-	sigaddset(&mask, SIGTERM);
-	pthread_sigmask(SIG_BLOCK, &mask, NULL);
+	/* Set up signal handling */
+	struct sigaction sa = {
+		.sa_handler = signal_handler,
+		.sa_flags = SA_RESTART,
+	};
+	sigemptyset(&sa.sa_mask);
+	sigaction(SIGTERM, &sa, NULL);
 
 	printf("Worker process started (PID: %d)\n", getpid());
 
-	while (1) {
+	while (running) {
 		struct timeval timeout = {
-			.tv_sec = 60,
+			.tv_sec = 1,
 			.tv_usec = 0
 		};
 
@@ -562,12 +582,7 @@ static void worker_process(int tun_fd, int udp_fd, struct tunnel_config *config)
 			process_udp_packet(tun_fd, udp_fd, config);
 		}
 	}
-}
 
-static void signal_handler(int signo)
-{
-	/* Forward signal to all children */
-	kill(0, signo);
 	exit(0);
 }
 
@@ -683,54 +698,78 @@ int main(int argc, char *argv[])
 
 	/* Create worker processes */
 	int num_workers = get_num_workers();
+	pid_t *worker_pids = calloc(num_workers, sizeof(pid_t));
+	if (!worker_pids) {
+		perror("calloc");
+		exit(1);
+	}
+
 	printf("Starting %d worker processes (system has %d cores)\n",
 	       num_workers, get_nprocs());
 
 	for (int i = 0; i < num_workers; i++) {
-		pid_t pid = fork();
-
-		if (pid < 0) {
+		worker_pids[i] = fork();
+		if (worker_pids[i] < 0) {
 			perror("fork");
 			exit(1);
 		}
-
-		if (pid == 0) {
+		if (worker_pids[i] == 0) {
+			free(worker_pids);
 			worker_process(tun_fd, udp_fd, &config);
 			exit(0);
 		}
 	}
 
-	/* Parent process */
-	while (1) {
+	/* Parent process: wait for signal or child death */
+	while (running) {
 		int status;
 		pid_t pid = wait(&status);
 
 		if (pid < 0) {
 			if (errno == EINTR)
 				continue;
+			if (errno == ECHILD)
+				break;
 			perror("wait");
-			exit(1);
+			break;
 		}
 
-		/* If worker died abnormally, create a new one */
-		if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-			printf
-			    ("Worker process %d died abnormally, starting new worker\n",
-			     pid);
-			pid = fork();
-
-			if (pid < 0) {
-				perror("fork");
-				exit(1);
-			}
-
-			if (pid == 0) {
-				worker_process(tun_fd, udp_fd, &config);
-				exit(0);
+		/* If we're still running and a worker died, restart it */
+		if (running) {
+			for (int i = 0; i < num_workers; i++) {
+				if (worker_pids[i] == pid) {
+					printf
+					    ("Worker process %d died, starting new worker\n",
+					     pid);
+					worker_pids[i] = fork();
+					if (worker_pids[i] < 0) {
+						perror("fork");
+						running = 0;
+						break;
+					}
+					if (worker_pids[i] == 0) {
+						free(worker_pids);
+						worker_process(tun_fd, udp_fd,
+							       &config);
+						exit(0);
+					}
+					break;
+				}
 			}
 		}
 	}
 
+	/* Clean shutdown */
+	for (int i = 0; i < num_workers; i++) {
+		if (worker_pids[i] > 0) {
+			kill(worker_pids[i], SIGTERM);
+		}
+	}
+
+	/* Wait for all children to exit */
+	while (wait(NULL) > 0) ;
+
+	free(worker_pids);
 	pthread_mutex_destroy(&config.store_mutex);
 	return 0;
 }
