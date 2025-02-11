@@ -77,7 +77,7 @@ static uint32_t generate_random_local_ip(void)
 	static int initialized = 0;
 
 	if (!initialized) {
-		srand(0);
+		srand(time(NULL));
 		initialized = 1;
 	}
 
@@ -112,14 +112,19 @@ static struct in_addr store_connection(struct tunnel_config *config,
 	struct connection_store *current = config->store, *entry;
 	struct in_addr assigned_addr = {.s_addr = INADDR_ANY };
 	uint32_t local_ip;
+	time_t now = time(NULL);
 
-	/* Check if entry already exists */
+	/* First check if this IP+port combination exists */
 	while (current != NULL) {
 		if (current->peer_ip_addr.s_addr == saddr.s_addr &&
 		    current->peer_udp_port == udp_sport) {
 			/* Update timestamp and return existing tunnel IP */
-			current->last_seen = time(NULL);
+			current->last_seen = now;
 			return current->peer_tun_ip_addr;
+		}
+		/* Also update last_seen for any matching IP to prevent timeout */
+		if (current->peer_ip_addr.s_addr == saddr.s_addr) {
+			current->last_seen = now;
 		}
 		current = current->next;
 	}
@@ -140,9 +145,13 @@ static struct in_addr store_connection(struct tunnel_config *config,
 	entry->peer_ip_addr = saddr;
 	entry->peer_udp_port = udp_sport;
 	entry->peer_tun_ip_addr.s_addr = local_ip;
-	entry->last_seen = time(NULL);
+	entry->last_seen = now;
 	entry->next = config->store;
 	config->store = entry;
+
+	printf
+	    ("New connection stored: Peer IP %s UDP port %d assigned tunnel IP %s\n",
+	     inet_ntoa(saddr), udp_sport, inet_ntoa(entry->peer_tun_ip_addr));
 
 	assigned_addr.s_addr = local_ip;
 	return assigned_addr;
