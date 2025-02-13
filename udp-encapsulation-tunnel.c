@@ -18,7 +18,7 @@
 #define th_sum		check
 #endif
 
-#define BUFFER_SIZE	1492
+#define BUFFER_SIZE	2048
 #define IP_HEADER_LEN	20
 
 /* Define the range for IPv4 addr assignment */
