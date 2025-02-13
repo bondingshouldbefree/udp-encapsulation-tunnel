@@ -1,0 +1,10 @@
+[Unit]
+Description=UDP Encapsulation Tunnel Service
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/stdbuf -oL -eL /usr/bin/udp-encapsulation-tunnel --interface tun0 --listen-port 12346 --bind-to-interface eth0
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
