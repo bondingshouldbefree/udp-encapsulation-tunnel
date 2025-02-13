@@ -5,6 +5,7 @@
 #include <net/if.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -505,6 +506,11 @@ static void cleanup_old_connections(struct tunnel_config *config)
 	}
 }
 
+static void signal_handler(int signo)
+{
+	printf("Received signal %d\n", signo);
+}
+
 int main(int argc, char *argv[])
 {
 	int maxfd, option, tun_fd, udp_fd;
@@ -594,6 +600,19 @@ int main(int argc, char *argv[])
 	printf("Listening on port: %d\n", config.listen_port);
 	if (config.endpoint_port) {
 		printf("Endpoint port: %d\n", config.endpoint_port);
+	}
+
+	/* Add signal handling setup */
+	struct sigaction sa = {
+		.sa_handler = signal_handler,
+		.sa_flags = SA_RESTART,
+	};
+	sigemptyset(&sa.sa_mask);
+
+	if (sigaction(SIGINT, &sa, NULL) == -1 ||
+		sigaction(SIGTERM, &sa, NULL) == -1) {
+		perror("Failed to set up signal handlers");
+		exit(1);
 	}
 
 	/* Main loop
